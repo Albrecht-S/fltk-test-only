@@ -80,23 +80,104 @@ public:
       delete this;
     return nTemp;
   }
+
+  /*
+  *************************************************************************
+
+  Non-DPI-aware applications receive different units for the 'POINTL pt'
+  argument of the DragEnter, DragOver, and Drop member functions:
+
+  (1) DragEnter receives the mouse coordinates in unscaled screen units,
+      which appears to be wrong.
+
+  (2) DragOver and Drop receive the mouse coordinates in "down-scaled"
+      units as the app "sees" coordinates in its own coordinate system.
+      This is correct.
+
+  This looks like a Windows bug because non-DPI-aware apps are
+  supposed to always receive (down-)scaled units from the OS.
+
+  Otherwise non-DPI-aware (legacy) programs would need code changes
+  to work properly on scaled Windows displays. This was the reason
+  why this bug was found in the FLTK library.
+
+  The *workaround* is to *overwrite* the coordinates in 'pt'
+  with the mouse coordinates in application coordinate view.
+
+  Set FIX_DRAG_ENTER == 0 to get the original, unchanged code, or
+  set FIX_DRAG_ENTER == 1 to get the minimal workaround (see below), or
+  set FIX_DRAG_ENTER == 2 or 3 to get (1) with debug output.
+
+  Default is 2 which shows only debug output relevant to Microsoft,
+  whereas 3 would also show debug output from DragOver and Drop.
+
+  Note: Tabs must be set to 8 columns width to show indentation
+  properly.
+
+  *************************************************************************
+  */
+
+#define FIX_DRAG_ENTER (2) // 0 = don't fix at all (original code)
+                           // 1 = minimal fix: silently overwrite 'pt' with mouse coordinates
+			   // 2 = fix coordinates with debug output
+			   // 3 = fix coordinates with even more debug output
+
   HRESULT STDMETHODCALLTYPE DragEnter( IDataObject *pDataObj, DWORD /*grfKeyState*/, POINTL pt, DWORD *pdwEffect) {
-    if( !pDataObj ) return E_INVALIDARG;
-    // set e_modifiers here from grfKeyState, set e_x and e_root_x
-    // check if FLTK handles this drag and return if it can't (i.e. BMP drag without filename)
-/* Tricky point here: Not DPI–aware applications use different units for the 'POINTL pt' argument
-of the DragEnter, DragOver, and Drop member functions.
-DragEnter receives the mouse coordinates in unscaled screen units,
-whereas DragOver and Drop receive the mouse coordinates in scaled units.
- 
-DPI–aware applications transmit unscaled screen units to all 3 member functions.
-These coordinates should be divided by the window's scale to get FLTK units.
-*/
-#ifndef FLTK_HIDPI_SUPPORT
+    if (!pDataObj) return E_INVALIDARG;
+
+#if (FIX_DRAG_ENTER == 1)  // minimal fix: silently overwrite 'pt' with mouse coordinates
+
+    // get cursor coordinates
     POINT mp;
-    GetCursorPos(&mp); // bypass Windows bug that gives mouse coordinates in unscaled screen units
-    pt.x = mp.x; pt.y = mp.y;
-#endif
+    GetCursorPos(&mp);
+
+    // overwrite pt
+    pt.x = mp.x;
+    pt.y = mp.y;
+
+#elif (FIX_DRAG_ENTER > 1) // fix with more or less Debug output
+
+    printf("\n[%s:%4d] pt = (%4d,%4d)\n", __FUNCTION__, __LINE__, pt.x, pt.y);
+    fflush(stdout);
+
+    // get "real" mouse coordinates as seen by the application
+    POINT mp;
+    GetCursorPos(&mp);
+    int mx = mp.x;
+    int my = mp.y;
+
+    // get system (or monitor?) scaling factor (just for proof of bug)
+    // note: this is NOT necessary nor used in real application code !
+    float scaling = 1.0;
+    {
+      HDC hdc = GetDC(NULL);
+      int hr  = GetDeviceCaps(hdc, HORZRES);        // pixels visible to the app
+      int dhr = GetDeviceCaps(hdc, DESKTOPHORZRES); // true number of pixels on display
+      ReleaseDC(NULL, hdc);
+      scaling = float(dhr) / float(hr);             // calculate scaling factor
+      // scaling = int(scaling * 100 + 0.5) / 100.;    // round to 2 digits after decimal point
+    }
+
+    // show and fix the bug, i.e. eventually overwrite pt with "real" mouse coordinates
+    if (pt.x != mx || pt.y != my) {
+      printf("[%s:%4d] *** BUG *** pt = (%4d,%4d), mouse = (%4d,%4d), scaling = %3d%%\n",
+	__FUNCTION__, __LINE__, pt.x, pt.y, mx, my, int(scaling * 100. + 0.5));
+
+      // calculate down-scaled coordinates for comparison with mouse coordinates
+      int sx, sy;
+      sx = int(double(pt.x) / scaling + 0.5);
+      sy = int(double(pt.y) / scaling + 0.5);
+      printf("[%s:%4d] *** FIX ==> pt = (%4d,%4d)\n",
+	__FUNCTION__, __LINE__, sx, sy);
+      fflush(stdout);
+
+      // now *overwrite* pt with the mouse coordinates
+      pt.x = mx;
+      pt.y = my;
+    }
+
+#endif // (FIX_DRAG_ENTER)
+
     POINT ppt;
     Fl::e_x_root = ppt.x = pt.x;
     Fl::e_y_root = ppt.y = pt.y;
@@ -108,6 +189,13 @@ These coordinates should be divided by the window's scale to get FLTK units.
       Fl::e_y_root /= s;
       Fl::e_x = Fl::e_x_root-target->x();
       Fl::e_y = Fl::e_y_root-target->y();
+#if (FIX_DRAG_ENTER > 2) // fix DragEnter with Debug output
+      printf("[%s:%4d] root = (%4d, %4d), Fl::e_x/y = (%4d,%4d), s = %7.3f\n",
+	      __FUNCTION__, __LINE__,
+	      Fl::e_x_root, Fl::e_y_root,
+	      Fl::e_x, Fl::e_y, s);
+      fflush(stdout);
+#endif // (FIX_DRAG_ENTER)
     }
     fl_dnd_target_window = target;
     px = pt.x; py = pt.y;
@@ -134,6 +222,10 @@ These coordinates should be divided by the window's scale to get FLTK units.
       *pdwEffect = lastEffect = DROPEFFECT_NONE;
       return S_OK;
     }
+#if (FIX_DRAG_ENTER > 2) // fix DragEnter with Debug output
+    printf("[%s:%4d] pt = (%4d,%4d)\n", __FUNCTION__, __LINE__, pt.x, pt.y);
+    fflush(stdout);
+#endif // (FIX_DRAG_ENTER)
     // set e_modifiers here from grfKeyState, set e_x and e_root_x
     Fl::e_x_root = pt.x;
     Fl::e_y_root = pt.y;
@@ -143,6 +235,13 @@ These coordinates should be divided by the window's scale to get FLTK units.
       Fl::e_y_root /= s;
       Fl::e_x = Fl::e_x_root-fl_dnd_target_window->x();
       Fl::e_y = Fl::e_y_root-fl_dnd_target_window->y();
+#if (FIX_DRAG_ENTER > 2) // fix DragEnter with Debug output
+      printf("[%s:%4d] root = (%4d, %4d), Fl::e_x/y = (%4d,%4d), s = %7.3f\n",
+	__FUNCTION__, __LINE__,
+	Fl::e_x_root, Fl::e_y_root,
+	Fl::e_x, Fl::e_y, s);
+      fflush(stdout);
+#endif // (FIX_DRAG_ENTER)
     }
     if (fillCurrentDragData(0)) {
       // Fl_Group will change DND_DRAG into DND_ENTER and DND_LEAVE if needed
@@ -160,6 +259,10 @@ These coordinates should be divided by the window's scale to get FLTK units.
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE DragLeave() {
+#if (FIX_DRAG_ENTER > 2) // fix DragEnter with Debug output
+    printf("[%s:%4d]\n\n", __FUNCTION__, __LINE__);
+    fflush(stdout);
+#endif // (FIX_DRAG_ENTER)
     if ( fl_dnd_target_window && fillCurrentDragData(0))
     {
       Fl::handle( FL_DND_LEAVE, fl_dnd_target_window );
@@ -171,6 +274,10 @@ These coordinates should be divided by the window's scale to get FLTK units.
   HRESULT STDMETHODCALLTYPE Drop( IDataObject *data, DWORD /*grfKeyState*/, POINTL pt, DWORD* /*pdwEffect*/) {
     if ( !fl_dnd_target_window )
       return S_OK;
+#if (FIX_DRAG_ENTER > 2) // fix DragEnter with Debug output
+    printf("[%s:%4d] pt = (%4d,%4d)\n", __FUNCTION__, __LINE__, pt.x, pt.y);
+    fflush(stdout);
+#endif // (FIX_DRAG_ENTER)
     Fl_Window *target = fl_dnd_target_window;
     fl_dnd_target_window = 0;
     Fl::e_x_root = pt.x;
@@ -182,6 +289,13 @@ These coordinates should be divided by the window's scale to get FLTK units.
       Fl::e_x = Fl::e_x_root-target->x();
       Fl::e_y = Fl::e_y_root-target->y();
     }
+#if (FIX_DRAG_ENTER > 2) // fix DragEnter with Debug output
+    printf("[%s:%4d] root = (%4d, %4d), Fl::e_x/y = (%4d,%4d), s = %7.3f\n",
+      __FUNCTION__, __LINE__,
+      Fl::e_x_root, Fl::e_y_root,
+      Fl::e_x, Fl::e_y, s);
+    fflush(stdout);
+#endif // (FIX_DRAG_ENTER)
     // tell FLTK that the user released an object on this widget
     if ( !Fl::handle( FL_DND_RELEASE, target ) )
       return S_OK;

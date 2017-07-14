@@ -1,0 +1,161 @@
+Windows Bug Report:
+
+Drag and Drop to "non-DPI-aware" applications can fail on high-DPI devices.
+
+(1a) Short Problem Description:
+
+    The method DragEnter of a class derived from IDropTarget receives
+    wrong (unscaled) screen coordinates if the system or monitor uses
+    a scaling factor other than 100%. See documentation at:
+
+    https://msdn.microsoft.com/en-us/library/windows/desktop/ms680106(v=vs.85).aspx
+
+(1b) Long Problem Description:
+
+    Non-DPI-aware applications receive different units for the 'POINTL pt'
+    argument of the DragEnter, DragOver, and Drop member functions:
+
+    (1) DragEnter receives the screen coordinates in unscaled screen units.
+	This appears to be wrong.
+
+    (2) DragOver and Drop receive the screen coordinates in "down-scaled"
+	units as the app "sees" coordinates in its own coordinate system.
+	This appears to be correct.
+
+    This looks like a Windows bug because non-DPI-aware apps are supposed
+    to (must!) always receive (down-)scaled screen coordinates from the OS.
+
+    Otherwise non-DPI-aware (legacy) programs would need code changes
+    to work properly on scaled Windows displays. This was the reason why
+    this bug was found in the development process of the FLTK library.
+
+    The current *workaround* in the FLTK library is to *overwrite* the
+    coordinates in 'pt' with the cursor coordinates by using GetCursorPos().
+
+    The fact that the coordinates in argument 'pt' and from GetCursorPos()
+    differ (by the screen scaling factor) is a strong indication that this
+    is a Windows bug since IDropTarget::DragEnter is called directly from
+    Windows (OLE?) code, supposedly from DoDragDrop.
+
+    Note: there is no issue if the system/monitor scaling factor is 100%.
+
+    The 'pt' parameter is documented in IDropTarget::DragEnter and others:
+
+      [in] POINTL structure containing the current cursor coordinates
+	   in screen coordinates.
+
+    https://msdn.microsoft.com/en-us/library/windows/desktop/ms680106(v=vs.85).aspx
+
+    This should, as far as non-DPI-aware applications are concerned, be their
+    own (virtual) coordinate system (i.e. in my example below: 1829 x 1029),
+    not the real, physical (3200 x 1800) screen coordinates. At least this
+    should be the same for all methods DragEnter, DragOver, and Drop and
+    GetCursorPos() which is obviously not the case.
+
+    The "minimal fix" shown below allows to work around the issue, but this
+    would mean to change code of non-DPI-aware (legacy) applications, which
+    is a no-go. Instead, this should be fixed in the Windows code that calls
+    IDropTarget::DragEnter().
+
+(2) System Environment:
+
+    Windows 10 Home, Version 1703, Build 15063.413 with:
+
+    Screen resolution = 3200 x 1800
+    Scaling factor    = 175 %
+    App screen res.  ~= 1829 x 1029
+
+    Build system      = Visual Studio 2015 Community (64-bit and/or 32-bit)
+
+    The issue can be seen at every scaling factor except 1 (100%) and very
+    likely on Windows 7/8/8.1 as well (but I can no longer test these OS's).
+
+    It is also visible if built with MinGW.
+
+(3) Minimal fix, i.e. *workaround* in class derived from IDropTarget:
+
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject *pDataObj,
+					DWORD /*grfKeyState*/,
+					POINTL pt,
+					DWORD *pdwEffect)
+    {
+	// get cursor coordinates to fix 'pt'
+	POINT mp;
+	GetCursorPos(&mp);
+
+	// overwrite 'pt' with correct cursor coordinates
+	pt.x = mp.x;
+	pt.y = mp.y;
+
+	// do the actual work ...
+	return S_OK;
+    }
+
+(4) Working Code Example:
+
+    Unfortunately I can't provide a simple reproducer, but I believe
+    that the description above is sufficient. Anyway:
+
+    The code in FLTK 1.3 (svn, git) contains a fix using the minimal
+    workaround described above in file src/fl_dnd_win32.cxx. Links:
+
+    http://seriss.com/public/fltk/fltk/branches/branch-1.3/src/fl_dnd_win32.cxx
+    https://github.com/Albrecht-S/fltk-test-only/blob/branch-1.3/src/fl_dnd_win32.cxx
+
+    Use an empty user name and password to access the svn repo.
+
+    A similar fix is in FLTK 1.4 (svn, git) in the same file:
+
+    http://seriss.com/public/fltk/fltk/branches/branch-1.4/src/fl_dnd_win32.cxx
+    https://github.com/Albrecht-S/fltk-test-only/blob/branch-1.4/src/fl_dnd_win32.cxx
+
+    Again, use an empty user name and password to access the svn repo.
+
+    The modified (test) code is in my FLTK fork at GitHub:
+
+    https://github.com/Albrecht-S/fltk-test-only/blob/Fix_IDropTarget_DragEnter/src/fl_dnd_win32.cxx
+
+    If you need to build FLTK to test, download the distribution from my
+    FLTK fork (branch "Fix_IDropTarget_DragEnter") to get the code with all
+    debug infos and the workaround described above.
+
+    Create your preferred build system with CMake (e.g. Visual Studio 2015),
+    then run the 'editor' executable in debug mode (to have a console window)
+    and drag some text (from any file opened in Visual Studio) into the
+    'editor' window. My test results follow here in paragraph 5 and 6, resp.
+
+    This description is available online in my personal FLTK fork at:
+
+    https://github.com/Albrecht-S/fltk-test-only/blob/Fix_IDropTarget_DragEnter/Fix_IDropTarget_DragEnter.txt
+
+
+(5) Testing with FIX_DRAG_ENTER == 2 (see code):
+
+    [FLDropTarget::DragEnter: 142] pt = ( 649, 926)
+    [FLDropTarget::DragEnter: 166] *** BUG *** pt = ( 649, 926), cursor = ( 371, 529), scaling = 175%
+    [FLDropTarget::DragEnter: 173] *** FIX ==> pt = ( 371, 529)
+
+    [FLDropTarget::DragEnter: 139] pt = (2990,1728)
+    [FLDropTarget::DragEnter: 163] *** BUG *** pt = (2990,1728), cursor = (1709, 987), scaling = 175%
+    [FLDropTarget::DragEnter: 170] *** FIX ==> pt = (1709, 988)
+
+(6) Testing with FIX_DRAG_ENTER == 3 (see code):
+
+    [FLDropTarget::DragEnter: 142] pt = ( 462, 247)
+    [FLDropTarget::DragEnter: 166] *** BUG *** pt = ( 462, 247), cursor = ( 264, 141), scaling = 175%
+    [FLDropTarget::DragEnter: 173] *** FIX ==> pt = ( 264, 141)
+    [FLDropTarget::DragEnter: 196] root = ( 264,  141), Fl::e_x/y = ( 260, -25), s =   1.000
+
+    [FLDropTarget::DragOver: 228] pt = ( 262, 150)
+    [FLDropTarget::DragOver: 242] root = ( 262,  150), Fl::e_x/y = ( 258, -16), s =   1.000
+
+    [FLDropTarget::DragOver: 228] pt = ( 261, 158)
+    [FLDropTarget::DragOver: 242] root = ( 261,  158), Fl::e_x/y = ( 257,  -8), s =   1.000
+
+    ...
+
+    [FLDropTarget::DragOver: 228] pt = ( 246, 269)
+    [FLDropTarget::DragOver: 242] root = ( 246,  269), Fl::e_x/y = ( 242, 103), s =   1.000
+
+    [FLDropTarget::Drop: 280] pt = ( 246, 269)
+    [FLDropTarget::Drop: 296] root = ( 246,  269), Fl::e_x/y = ( 242, 103), s =   1.000
